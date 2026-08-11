@@ -20,6 +20,13 @@ export type TouristPoint = {
 
 // Coordinates sourced from OpenStreetMap search results for the named places.
 // This registry is intentionally data-only so more regions can be added later.
+const CATEGORY_PRIORITY: Record<TouristPoint['category'], number> = {
+  landmark: 4,
+  hotel: 3,
+  natural: 2,
+  beach: 1,
+};
+
 export const TOURIST_POINTS: TouristPoint[] = [
   {
     id: 'forte-de-copacabana',
@@ -29,16 +36,6 @@ export const TOURIST_POINTS: TouristPoint[] = [
     category: 'landmark',
     description: 'Museu histórico na ponta de Copacabana',
     importance: 1,
-    city: 'Rio de Janeiro',
-    country: 'Brasil',
-  },
-  {
-    id: 'praia-do-leme',
-    name: 'PRAIA DO LEME',
-    latitude: -22.9644465,
-    longitude: -43.1698569,
-    category: 'beach',
-    importance: 0.82,
     city: 'Rio de Janeiro',
     country: 'Brasil',
   },
@@ -83,16 +80,6 @@ export const TOURIST_POINTS: TouristPoint[] = [
     city: 'Rio de Janeiro',
     country: 'Brasil',
   },
-  {
-    id: 'praia-de-copacabana',
-    name: 'PRAIA DE COPACABANA',
-    latitude: -22.9757003,
-    longitude: -43.1866161,
-    category: 'beach',
-    importance: 0.9,
-    city: 'Rio de Janeiro',
-    country: 'Brasil',
-  },
 ];
 
 export type VisibleTouristPoint = TouristPoint & {
@@ -108,25 +95,35 @@ export function findVisibleTouristPoints(
   pitchDegrees: number | null,
   horizontalFov = DEFAULT_HORIZONTAL_FOV,
 ) {
-  return TOURIST_POINTS
+  const points = TOURIST_POINTS
     .map((point) => {
       const target = { latitude: point.latitude, longitude: point.longitude };
       const bearing = calculateBearing(origin, target);
       const distanceKm = calculateDistance(origin, target);
+      const alignment = angularDifference(bearing, heading);
       const position = getArPosition(bearing, heading, pitchDegrees, horizontalFov);
+      const categoryPriority = CATEGORY_PRIORITY[point.category] ?? 0;
+      const specificity = point.importance ?? 0;
+      const alignmentScore = Math.max(0, 1 - alignment / 90);
+      const score = alignmentScore * 1000 + specificity * 100 + categoryPriority * 10 - Math.min(distanceKm, 200);
+
       return {
         ...point,
         bearing,
         distanceKm,
-        alignment: angularDifference(bearing, heading),
+        alignment,
         position,
+        categoryPriority,
+        score,
       };
     })
     .filter((point) => point.alignment <= horizontalFov / 2)
     .sort((first, second) => (
+      second.score - first.score ||
       first.alignment - second.alignment ||
       second.importance - first.importance ||
       first.distanceKm - second.distanceKm
-    ))
-    .slice(0, 5);
+    ));
+
+  return points.slice(0, 5);
 }

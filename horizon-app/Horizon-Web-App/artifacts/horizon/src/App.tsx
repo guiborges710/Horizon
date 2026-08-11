@@ -35,6 +35,12 @@ type HorizonLocation = {
   status: LocationStatus;
 };
 
+const DEBUG = false;
+const POINT_ALIGNMENT_TOLERANCE = 6;
+const MAX_SECONDARY_MARKERS = 2;
+const MAX_VISIBLE_POI_DISTANCE_KM = 80;
+const SCENE_UPDATE_INTERVAL_MS = 140;
+
 const DEMO_LOCATION = {
   latitude: -22.9675,
   longitude: -43.1798,
@@ -101,6 +107,7 @@ function Home() {
   const locationWatchRef = useRef<number | null>(null);
   const headingFrameRef = useRef<number | undefined>(undefined);
   const calculationTimerRef = useRef<number | undefined>(undefined);
+  const lastSceneAtRef = useRef<number>(0);
   const targetHeadingRef = useRef(100);
   const smoothedHeadingRef = useRef(100);
 
@@ -299,26 +306,24 @@ function Home() {
       return;
     }
 
-    const calculationHeading = isDemo ? 100 : heading;
+    const calculationHeading = heading;
 
-    // Nearby landmarks can be resolved without waiting for the world dataset.
-    // This is important for places such as Forte de Copacabana.
     const points = findVisibleTouristPoints(
       calculationOrigin,
       calculationHeading,
       pitchDegrees,
-    ).filter((point) => point.distanceKm <= 80);
+    ).filter((point) => point.distanceKm <= MAX_VISIBLE_POI_DISTANCE_KM);
     setVisiblePoints(points);
 
-    const alignedPoint = points[0];
-    if (alignedPoint && alignedPoint.alignment <= 18) {
+    const bestPoint = points[0];
+    if (bestPoint && bestPoint.alignment <= POINT_ALIGNMENT_TOLERANCE) {
       setResult({
         state: 'poi',
-        name: alignedPoint.name,
-        distanceKm: alignedPoint.distanceKm,
-        bearing: alignedPoint.bearing,
-        position: alignedPoint.position,
-        detail: alignedPoint.city,
+        name: bestPoint.name,
+        distanceKm: bestPoint.distanceKm,
+        bearing: bestPoint.bearing,
+        position: bestPoint.position,
+        detail: bestPoint.city,
       });
       return;
     }
@@ -354,18 +359,70 @@ function Home() {
       state: 'ocean',
       name: 'OCEANO ABERTO',
       detail: 'Nenhuma terra encontrada nessa direção',
+      position: getArPosition(calculationHeading, calculationHeading, pitchDegrees),
     });
-  }, [calculationOrigin, heading, isDemo, landIndex, pitchDegrees]);
+  }, [calculationOrigin, heading, landIndex, pitchDegrees]);
+
+  const scheduleSceneUpdate = useCallback(() => {
+    const now = performance.now();
+    const elapsed = now - lastSceneAtRef.current;
+
+    if (elapsed >= SCENE_UPDATE_INTERVAL_MS) {
+      lastSceneAtRef.current = now;
+      calculateScene();
+      return;
+    }
+
+    if (calculationTimerRef.current) window.clearTimeout(calculationTimerRef.current);
+    calculationTimerRef.current = window.setTimeout(
+      () => {
+        lastSceneAtRef.current = performance.now();
+        calculateScene();
+      },
+      SCENE_UPDATE_INTERVAL_MS - elapsed,
+    );
+  }, [calculateScene]);
 
   useEffect(() => {
     if (appState !== 'experience') return;
     setResult((current) => current.state === 'waiting' ? { state: 'calculating' } : current);
-    if (calculationTimerRef.current) window.clearTimeout(calculationTimerRef.current);
-    calculationTimerRef.current = window.setTimeout(calculateScene, 220);
+    scheduleSceneUpdate();
     return () => {
       if (calculationTimerRef.current) window.clearTimeout(calculationTimerRef.current);
     };
-  }, [appState, calculateScene]);
+  }, [appState, scheduleSceneUpdate]);
+
+  useEffect(() => {
+    if (appState !== 'experience') return;
+    scheduleSceneUpdate();
+  }, [appState, heading, pitchDegrees, calculationOrigin, landIndex, scheduleSceneUpdate]);
+
+  const selectedPoi = result.state === 'poi'
+    ? visiblePoints.find((point) => point.name === result.name && point.bearing === result.bearing)
+    : null;
+  const mainTarget = result.state === 'poi'
+    ? selectedPoi ?? visiblePoints[0]
+    : result.state === 'land'
+      ? { name: result.name, distanceKm: result.distanceKm, position: result.position, city: result.detail }
+      : null;
+
+  const secondaryMarkers = useMemo(() => {
+    const pool = visiblePoints
+      .filter((point) => point.name !== result.name)
+      .slice(0, 5);
+    const chosen: VisibleTouristPoint[] = [];
+
+    for (const point of pool) {
+      if (chosen.length >= MAX_SECONDARY_MARKERS) break;
+      const closeToExisting = chosen.some((existing) => (
+        Math.abs(existing.position.left - point.position.left) < 10 &&
+        Math.abs(existing.position.top - point.position.top) < 10
+      ));
+      if (!closeToExisting) chosen.push(point);
+    }
+
+    return chosen;
+  }, [visiblePoints, result.name]);
 
   const diagnosticTarget = visiblePoints[0];
   const diagnosticDelta = diagnosticTarget ? Math.abs(shortestHeadingDelta(heading, diagnosticTarget.bearing)) : undefined;
@@ -527,106 +584,88 @@ function Home() {
         <div className="hud-line left-[61%] bottom-[22%] h-[30%]" />
       </div>
 
-      <div className="absolute left-6 top-6 z-20 rounded-2xl border border-[#fffdf3]/10 bg-[#0f2426]/70 p-3 text-[9px] uppercase tracking-[0.15em] text-[#fffdf3] shadow-[0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-sm">
-        <div className="mb-2 flex items-center justify-between gap-3 text-[10px] font-semibold text-[#d8ba77]">
-          <span>DIAGNÓSTICO</span>
-          <span className="font-mono text-[9px] text-[#a7d4c9]">live</span>
+      {DEBUG && (
+        <div className="absolute left-6 top-6 z-20 rounded-2xl border border-[#fffdf3]/10 bg-[#0f2426]/70 p-3 text-[9px] uppercase tracking-[0.15em] text-[#fffdf3] shadow-[0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-sm">
+          <div className="mb-2 flex items-center justify-between gap-3 text-[10px] font-semibold text-[#d8ba77]">
+            <span>DIAGNÓSTICO</span>
+            <span className="font-mono text-[9px] text-[#a7d4c9]">live</span>
+          </div>
+          <div className="space-y-1 text-[10px] leading-4 text-[#e8efe9]">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[#a7d4c9]/80">heading</span>
+              <span className="font-mono text-[11px]">{heading}°</span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[#a7d4c9]/80">poi</span>
+              <span className="font-mono text-[11px]">{diagnosticTarget?.name ?? '—'}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[#a7d4c9]/80">bearing</span>
+              <span className="font-mono text-[11px]">{diagnosticTarget?.bearing !== undefined ? `${diagnosticTarget.bearing}°` : '—'}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[#a7d4c9]/80">dif</span>
+              <span className="font-mono text-[11px]">{diagnosticDelta !== undefined ? `${Math.round(diagnosticDelta)}°` : '—'}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[#a7d4c9]/80">dist</span>
+              <span className="font-mono text-[11px]">{diagnosticTarget?.distanceKm !== undefined ? formatDistance(diagnosticTarget.distanceKm) : '—'}</span>
+            </div>
+          </div>
         </div>
-        <div className="space-y-1 text-[10px] leading-4 text-[#e8efe9]">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[#a7d4c9]/80">heading</span>
-            <span className="font-mono text-[11px]">{heading}°</span>
-          </div>
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[#a7d4c9]/80">poi</span>
-            <span className="font-mono text-[11px]">{diagnosticTarget?.name ?? '—'}</span>
-          </div>
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[#a7d4c9]/80">bearing</span>
-            <span className="font-mono text-[11px]">{diagnosticTarget?.bearing !== undefined ? `${diagnosticTarget.bearing}°` : '—'}</span>
-          </div>
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[#a7d4c9]/80">dif</span>
-            <span className="font-mono text-[11px]">{diagnosticDelta !== undefined ? `${Math.round(diagnosticDelta)}°` : '—'}</span>
-          </div>
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[#a7d4c9]/80">dist</span>
-            <span className="font-mono text-[11px]">{diagnosticTarget?.distanceKm !== undefined ? formatDistance(diagnosticTarget.distanceKm) : '—'}</span>
-          </div>
-        </div>
-      </div>
+      )}
 
-      <header className="safe-top absolute inset-x-0 top-0 z-10 flex items-start justify-between px-6">
-        <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.34em] text-[#eeeade]">HORIZON</p>
-        </div>
-        <div className="flex flex-col items-end gap-1 text-right">
-          <div className="flex items-baseline gap-3 text-[10px] uppercase tracking-[0.2em] text-[#eeeade]">
-            <span className="text-[#d8ba77]">{getCardinal(heading)}</span>
-            <span className="font-mono text-[11px] tracking-[0.08em] text-[#eeeade]/80">{heading}°</span>
+      <header className="safe-top absolute inset-x-0 top-0 z-10 px-4 pt-4">
+        <div className="relative flex items-center justify-center">
+          <span className="absolute left-0 text-[10px] uppercase tracking-[0.28em] text-[#eeeade]">HORIZON</span>
+          <div className="rounded-full bg-[#0f2426]/65 px-3 py-1 text-[9px] uppercase tracking-[0.18em] text-[#e8efe9] shadow-[0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-sm">
+            <span className="text-[#a7d4c9]">{getCardinal(normalizeHeading(heading - 45))}</span>
+            <span className="mx-2 font-mono text-[11px]">{heading}°</span>
+            <span className="text-[#a7d4c9]">{getCardinal(normalizeHeading(heading + 45))}</span>
           </div>
-          <span className={`font-mono text-[7px] uppercase tracking-[0.14em] ${sensorStatus === 'active' ? 'text-[#a7d4c9]/55' : 'text-[#d8ba77]/55'}`}>
-            sensor: {sensorStatus}
-          </span>
         </div>
       </header>
 
-      <div className="absolute right-6 top-[15%] z-10 text-right font-mono text-[7px] uppercase leading-4 tracking-[0.12em] text-[#a7d4c9]/55">
-        <p className={location.status === 'active' ? 'text-[#a7d4c9]/75' : 'text-[#d8ba77]/60'}>
-          GPS • {location.status === 'active' ? 'ACTIVE' : isDemo ? 'TESTE' : 'WAITING'}
-        </p>
-        {location.latitude !== null && <p>LAT {formatCoordinate(location.latitude)}</p>}
-        {location.longitude !== null && <p>LON {formatCoordinate(location.longitude)}</p>}
-        {location.accuracy !== null && <p>±{Math.round(location.accuracy)} m</p>}
+      {secondaryMarkers.map((point) => (
+        <div
+          key={point.id}
+          className="absolute z-10 rounded-full border border-[#d8ba77]/30 bg-[#0f2426]/70 p-2 text-center text-[#fffdf3]/80 shadow-[0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-sm"
+          style={{ left: `${point.position.left}%`, top: `${point.position.top}%`, width: 82, transform: 'translateX(-50%)' }}
+        >
+          <p className="text-[8px] uppercase leading-3 tracking-[0.18em]">{point.name}</p>
+        </div>
+      ))}
+
+      {mainTarget && mainTarget.position && (
+        <div className="absolute z-10 flex flex-col items-center" style={{ left: `${mainTarget.position.left}%`, top: `${mainTarget.position.top}%`, transform: 'translate(-50%, -130%)' }}>
+          <div className="h-0.5 w-10 bg-[#d8ba77]/70" />
+          <div className="mt-1 rounded-2xl bg-[#0f2426]/75 px-3 py-2 text-center shadow-[0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-sm">
+            <p className="text-[11px] uppercase tracking-[0.18em] text-[#fffdf3]">{mainTarget.name}</p>
+            {mainTarget.distanceKm !== undefined && (
+              <p className="mt-1 text-[10px] uppercase tracking-[0.18em] text-[#a7d4c9]">{formatDistance(mainTarget.distanceKm)}</p>
+            )}
+            {result.state === 'land' && (
+              <p className="mt-1 text-[8px] uppercase tracking-[0.18em] text-[#7f9390]">Próxima terra firme</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className="absolute left-1/2 top-1/2 z-10 h-6 w-6 -translate-x-1/2 -translate-y-1/2">
+        <div className="absolute left-1/2 top-1/2 h-1 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#d8ba77]" />
+        <div className="absolute left-1/2 top-0 h-3 w-[1px] -translate-x-1/2 rounded-full bg-[#d8ba77]/80" />
+        <div className="absolute left-1/2 bottom-0 h-3 w-[1px] -translate-x-1/2 rounded-full bg-[#d8ba77]/80" />
+        <div className="absolute left-0 top-1/2 h-[1px] w-3 -translate-y-1/2 rounded-full bg-[#d8ba77]/80" />
+        <div className="absolute right-0 top-1/2 h-[1px] w-3 -translate-y-1/2 rounded-full bg-[#d8ba77]/80" />
       </div>
 
-      {visiblePoints
-        .filter((point) => result.name !== point.name)
-        .map((point) => (
-          <div
-            key={point.id}
-            className="absolute z-10 max-w-[130px] -translate-x-1/2 text-center text-[#fffdf3]/80"
-            style={{ left: `${point.position.left}%`, top: `${point.position.top}%` }}
-          >
-            <p className="text-[9px] uppercase leading-3 tracking-[0.12em]">{point.name}</p>
-            <p className="mt-1 font-mono text-[9px] tracking-[0.08em] text-[#a7d4c9]/75">{formatDistance(point.distanceKm)}</p>
-          </div>
-        ))}
-
-      <section
-        className="result-readout absolute top-[45%] z-10 -translate-x-1/2"
-        style={{ left: `${result.position?.left ?? 61}%` }}
-      >
-        <div className="max-w-[210px]">
-          <h2 data-testid="text-result-continent" className="font-serif text-[44px] leading-none tracking-[-0.035em] text-[#fffdf3]">
-            {result.state === 'calculating' ? 'CALCULANDO...' : result.name ?? 'AGUARDANDO LEITURA'}
-          </h2>
-          <p className="mt-2 text-[10px] uppercase tracking-[0.24em] text-[#fffdf3]/75">
-            {result.state === 'poi' ? 'Ponto de interesse' : result.state === 'ocean' ? 'Nenhuma terra encontrada' : result.state === 'no-location' ? 'Localização necessária' : result.state === 'unavailable' ? 'Dados indisponíveis' : 'Próxima terra firme'}
-          </p>
-          {result.distanceKm !== undefined && (
-            <p data-testid="text-result-distance" className="mt-3 font-mono text-[12px] tracking-[0.1em] text-[#fffdf3]/90">{formatDistance(result.distanceKm)}</p>
-          )}
-          {result.detail && <p className="mt-2 text-[9px] uppercase tracking-[0.12em] text-[#a7d4c9]/60">{result.detail}</p>}
-        </div>
-      </section>
-
-      <button
-        type="button"
-        data-testid="button-demo-mode"
-        onClick={toggleDemo}
-        className="absolute bottom-[15.5%] right-6 z-10 rounded-full border border-[#fffdf3]/15 bg-[#102124]/20 px-3 py-2 text-[8px] uppercase tracking-[0.16em] text-[#fffdf3]/60 backdrop-blur-md transition-colors hover:border-[#d8ba77]/60 hover:text-[#eeeade]"
-      >
-        {isDemo ? 'Demonstração · ativa' : 'Demonstração'}
-      </button>
-
-      <footer className="safe-bottom absolute inset-x-0 bottom-0 z-10 flex items-center justify-between px-6">
+      <footer className="safe-bottom absolute inset-x-0 bottom-0 z-10 flex items-center justify-between px-6 pb-4 pt-3">
         <button
           type="button"
           data-testid="button-signal"
           aria-label="Abrir dados do sinal"
           onClick={() => setSheet('signal')}
-          className="px-1 py-3 text-[10px] uppercase tracking-[0.22em] text-[#fffdf3]/70 transition-colors hover:text-[#d8ba77]"
+          className="text-[10px] uppercase tracking-[0.18em] text-[#fffdf3]/75 transition-colors hover:text-[#d8ba77]"
         >
           Mapa
         </button>
@@ -635,18 +674,46 @@ function Home() {
           data-testid="button-capture"
           aria-label="Capturar leitura"
           onClick={takeCapture}
-          className={`relative flex h-[70px] w-[70px] items-center justify-center rounded-full border border-[#d8ba77]/70 bg-[#d8ba77]/10 text-[#d8ba77] transition-transform hover:scale-105 active:scale-95 ${isCapturing ? 'scale-95' : ''}`}
+          className={`relative flex h-10 w-10 items-center justify-center rounded-full border border-[#d8ba77]/40 bg-[#0f2426]/70 text-[#d8ba77] transition-transform hover:scale-105 active:scale-95 ${isCapturing ? 'scale-95' : ''}`}
         >
-          <span className="absolute inset-[5px] rounded-full border border-[#d8ba77]/25" />
-          <span className="h-[45px] w-[45px] rounded-full border border-[#d8ba77]/70" />
-          {captureNotice && <span className="absolute bottom-[-25px] left-1/2 w-[130px] -translate-x-1/2 text-center text-[8px] uppercase tracking-[0.2em] text-[#d8ba77]">{captureNotice}</span>}
+          <span className="h-4 w-4 rounded-full bg-[#d8ba77]" />
         </button>
         <button
           type="button"
           data-testid="button-about"
           aria-label="Sobre o HORIZON"
           onClick={() => setSheet('about')}
-          className="px-1 py-3 text-[10px] uppercase tracking-[0.22em] text-[#fffdf3]/70 transition-colors hover:text-[#d8ba77]"
+          className="text-[10px] uppercase tracking-[0.18em] text-[#fffdf3]/75 transition-colors hover:text-[#d8ba77]"
+        >
+          Sobre
+        </button>
+      </footer>
+
+      <footer className="safe-bottom absolute inset-x-0 bottom-0 z-10 flex items-center justify-between px-6 pb-4 pt-3">
+        <button
+          type="button"
+          data-testid="button-signal"
+          aria-label="Abrir dados do sinal"
+          onClick={() => setSheet('signal')}
+          className="text-[10px] uppercase tracking-[0.18em] text-[#fffdf3]/75 transition-colors hover:text-[#d8ba77]"
+        >
+          Mapa
+        </button>
+        <button
+          type="button"
+          data-testid="button-capture"
+          aria-label="Capturar leitura"
+          onClick={takeCapture}
+          className={`relative flex h-10 w-10 items-center justify-center rounded-full border border-[#d8ba77]/40 bg-[#0f2426]/70 text-[#d8ba77] transition-transform hover:scale-105 active:scale-95 ${isCapturing ? 'scale-95' : ''}`}
+        >
+          <span className="h-4 w-4 rounded-full bg-[#d8ba77]" />
+        </button>
+        <button
+          type="button"
+          data-testid="button-about"
+          aria-label="Sobre o HORIZON"
+          onClick={() => setSheet('about')}
+          className="text-[10px] uppercase tracking-[0.18em] text-[#fffdf3]/75 transition-colors hover:text-[#d8ba77]"
         >
           Sobre
         </button>
