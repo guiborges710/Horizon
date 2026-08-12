@@ -397,19 +397,20 @@ function Home() {
     scheduleSceneUpdate();
   }, [appState, heading, pitchDegrees, calculationOrigin, landIndex, scheduleSceneUpdate]);
 
-  const selectedPoi = result.state === 'poi'
-    ? visiblePoints.find((point) => point.name === result.name && point.bearing === result.bearing)
-    : null;
-  const mainTarget = result.state === 'poi'
-    ? selectedPoi ?? visiblePoints[0]
+  // Escolha do alvo principal: direta a partir dos pontos visíveis
+  // O retículo central é a referência — priorizamos alinhamento dentro de POINT_ALIGNMENT_TOLERANCE.
+  const selectedPoi = visiblePoints.find((point) => point.alignment <= POINT_ALIGNMENT_TOLERANCE) ?? null;
+
+  const mainTarget = selectedPoi
+    ? selectedPoi
     : result.state === 'land'
       ? { name: result.name, distanceKm: result.distanceKm, position: result.position, city: result.detail }
       : null;
 
   const secondaryMarkers = useMemo(() => {
     const pool = visiblePoints
-      .filter((point) => point.name !== result.name)
-      .slice(0, 5);
+      .filter((point) => point.id !== selectedPoi?.id)
+      .slice(0, 6);
     const chosen: VisibleTouristPoint[] = [];
 
     for (const point of pool) {
@@ -422,7 +423,7 @@ function Home() {
     }
 
     return chosen;
-  }, [visiblePoints, result.name]);
+  }, [visiblePoints, selectedPoi]);
 
   const diagnosticTarget = visiblePoints[0];
   const diagnosticDelta = diagnosticTarget ? Math.abs(shortestHeadingDelta(heading, diagnosticTarget.bearing)) : undefined;
@@ -651,12 +652,12 @@ function Home() {
         </div>
       )}
 
-      <div className="absolute left-1/2 top-1/2 z-10 h-6 w-6 -translate-x-1/2 -translate-y-1/2">
-        <div className="absolute left-1/2 top-1/2 h-1 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#d8ba77]" />
-        <div className="absolute left-1/2 top-0 h-3 w-[1px] -translate-x-1/2 rounded-full bg-[#d8ba77]/80" />
-        <div className="absolute left-1/2 bottom-0 h-3 w-[1px] -translate-x-1/2 rounded-full bg-[#d8ba77]/80" />
-        <div className="absolute left-0 top-1/2 h-[1px] w-3 -translate-y-1/2 rounded-full bg-[#d8ba77]/80" />
-        <div className="absolute right-0 top-1/2 h-[1px] w-3 -translate-y-1/2 rounded-full bg-[#d8ba77]/80" />
+      <div aria-hidden="true" className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-6 w-6 -translate-x-1/2 -translate-y-1/2">
+        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/90" style={{ width: 4, height: 4 }} />
+        <div className="absolute left-1/2 top-0 -translate-x-1/2 rounded-sm bg-white/70" style={{ width: 1, height: 10 }} />
+        <div className="absolute left-1/2 bottom-0 -translate-x-1/2 rounded-sm bg-white/70" style={{ width: 1, height: 10 }} />
+        <div className="absolute left-0 top-1/2 -translate-y-1/2 rounded-sm bg-white/70" style={{ width: 10, height: 1 }} />
+        <div className="absolute right-0 top-1/2 -translate-y-1/2 rounded-sm bg-white/70" style={{ width: 10, height: 1 }} />
       </div>
 
       <footer className="safe-bottom absolute inset-x-0 bottom-0 z-10 flex items-center justify-between px-6 pb-4 pt-3">
